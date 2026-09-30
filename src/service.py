@@ -10,7 +10,6 @@ class DomainService:
         self.repository = repository
         self.rules = rules or RuleEngine()
         self.audit = AuditTrail(repository)
-
     def _lookup(self, kind, field, value):
         return self.repository.find_entities(self.rules.normalize_kind(kind), field, value)
 
@@ -71,3 +70,8 @@ class DomainService:
 
     def audit_log(self, entity_id=None):
         return self.repository.list_audit(entity_id=entity_id)
+
+    def versions(self, entity_id):
+        if not self.repository.get_entity(entity_id):
+            raise NotFoundError("entity not found: " + entity_id)
+        return self.repository.list_versions(entity_id)

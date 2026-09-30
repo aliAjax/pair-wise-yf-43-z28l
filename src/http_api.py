@@ -19,7 +19,7 @@ def _json_bytes(payload):
     return json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
 
 
-def create_handler(service, rules, static_dir):
+def create_handler(service, rules, static_dir, batch_service=None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "ModularPython/1.0"
 
@@ -44,6 +44,10 @@ def create_handler(service, rules, static_dir):
 
         def _actor(self):
             return Actor.from_headers(self.headers)
+
+        def _require_batches(self):
+            if batch_service is None:
+                raise NotFoundError("batch service unavailable")
 
         def _body(self):
             length = int(self.headers.get("Content-Length", "0") or 0)
@@ -85,13 +89,29 @@ def create_handler(service, rules, static_dir):
                         return self._send_html(200, handle.read())
                 if parts == ["api", "audit"]:
                     return self._send(200, {"items": service.audit_log()})
+                if parts == ["api", "risk", "report"]:
+                    self._require_batches()
+                    query = parse_qs(parsed.query)
+                    window = int(query.get("within_days", [30])[0])
+                    return self._send(200, batch_service.risk_report(window))
+                if parts == ["api", "batches"]:
+                    self._require_batches()
+                    return self._send(200, {"items": batch_service.list_batches()})
+                if parts == ["api", "field", "batches"]:
+                    self._require_batches()
+                    query = parse_qs(parsed.query)
+                    include = query.get("include_uploaded", ["true"])[0] != "false"
+                    return self._send(
+                        200, {"items": batch_service.list_field_batches(include)}
+                    )
+                if len(parts) == 3 and parts[:2] == ["api", "batches"]:
+                    self._require_batches()
+                    return self._send(200, batch_service.get_batch(parts[2]))
+                if len(parts) == 4 and parts[:2] == ["api", "entities"] and parts[2] == "versions":
+                    return self._send(200, {"items": service.versions(parts[3])})
                 if len(parts) == 3 and parts[:2] == ["api", "entities"]:
                     return self._send(200, service.get(parts[2]))
                 if len(parts) >= 2 and parts[0] == "api":
-                    if parts[1] == "entities":
-                        raise NotFoundError("not found")
-                    if len(parts) == 3:
-                        return self._send(200, service.get(parts[2]))
                     query = parse_qs(parsed.query)
                     status = query.get("status", [None])[0]
                     return self._send(
@@ -107,6 +127,51 @@ def create_handler(service, rules, static_dir):
                 parsed = urlparse(self.path)
                 parts = [part for part in parsed.path.split("/") if part]
                 actor = self._actor()
+                if parts == ["api", "field", "batches"]:
+                    self._require_batches()
+                    body = self._body()
+                    return self._send(
+                        201,
+                        batch_service.register_batch(
+                            actor,
+                            body.pop("batch_no"),
+                            body.pop("batch_version"),
+                            body.pop("entries"),
+                            site=body.pop("site", None),
+                        ),
+                    )
+                if (
+                    len(parts) == 4
+                    and parts[:2] == ["api", "batches"]
+                    and parts[3] in ("upload", "reviews", "recheck")
+                ):
+                    self._require_batches()
+                    body = self._body()
+                    if parts[3] == "upload":
+                        return self._send(200, batch_service.upload_batch(actor, parts[2]))
+                    if parts[3] == "recheck":
+                        return self._send(
+                            200, batch_service.recheck(actor, parts[2])
+                        )
+                    return self._send(
+                        200,
+                        batch_service.add_review(
+                            actor, parts[2], body.get("note", "")
+                        ),
+                    )
+                if parts == ["api", "batches", "merge"]:
+                    self._require_batches()
+                    body = self._body()
+                    return self._send(
+                        200,
+                        batch_service.merge_batch(
+                            actor,
+                            body.pop("batch_no"),
+                            body.pop("batch_version"),
+                            body.pop("entries"),
+                            site=body.pop("site", None),
+                        ),
+                    )
                 if len(parts) == 3 and parts[:2] == ["api", "entities"]:
                     body = self._body()
                     action = body.pop("action", None)
@@ -152,6 +217,6 @@ def create_handler(service, rules, static_dir):
     return Handler
 
 
-def create_server(host, port, service, rules, static_dir):
-    handler = create_handler(service, rules, static_dir)
+def create_server(host, port, service, rules, static_dir, batch_service=None):
+    handler = create_handler(service, rules, static_dir, batch_service)
     return ThreadingHTTPServer((host, int(port)), handler)

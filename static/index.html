@@ -22,7 +22,14 @@
 GET  /api/&lt;kind&gt;
 POST /api/&lt;kind&gt;
 GET  /api/entities/&lt;id&gt;
-POST /api/entities/&lt;id&gt;/actions</pre>
+GET  /api/entities/versions/&lt;id&gt;
+POST /api/entities/&lt;id&gt;/actions
+POST /api/field/batches                         # 现场离线登记
+POST /api/batches/&lt;batch_no&gt;/upload            # 网络恢复后整批回传
+POST /api/batches/&lt;batch_no&gt;/reviews           # 双人复核（两签联动放行）
+POST /api/batches/&lt;batch_no&gt;/recheck           # 整改后复检
+GET  /api/batches/&lt;batch_no&gt;
+GET  /api/risk/report                           # 到期/隔离/held 风险</pre>
 </main>
 <script>
 async function checkHealth() {
