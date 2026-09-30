@@ -200,3 +200,122 @@ class SQLiteRepository:
         with self._connect() as connection:
             connection.execute("SELECT 1").fetchone()
         return True
+
+    def apply_batch_release(
+        self,
+        batch_id,
+        expected_version,
+        batch_patch,
+        instrument_id,
+        instrument_next_status,
+        instrument_patch,
+        method_id,
+        method_next_status,
+        method_patch,
+        result_id,
+        result_data,
+        actor_id,
+        actor_role,
+    ):
+        """Atomically apply a two-person-reviewed calibration batch.
+
+        In a single transaction: mark the batch released, update the instrument
+        status/due date, update the method applicability scope, and insert the
+        released result plus audit rows. Any version mismatch rolls the whole
+        thing back so no object can succeed on its own.
+        """
+        now = utcnow()
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+
+            batch_row = connection.execute(
+                "SELECT status, version, data FROM entities WHERE id = ?", (batch_id,)
+            ).fetchone()
+            if not batch_row:
+                raise NotFoundError("batch not found: " + batch_id)
+            batch_version = int(batch_row["version"])
+            if expected_version is not None and batch_version != int(expected_version):
+                raise ConflictError(
+                    "version conflict: expected %s, found %s"
+                    % (expected_version, batch_version)
+                )
+            batch_data = json.loads(batch_row["data"])
+            batch_data.update(batch_patch)
+            connection.execute(
+                "UPDATE entities SET status = 'released', version = version + 1, data = ?, updated_at = ? "
+                "WHERE id = ? AND version = ?",
+                (json.dumps(batch_data, ensure_ascii=False, sort_keys=True), now, batch_id, batch_version),
+            )
+            self._merge_entity_tx(
+                connection, instrument_id, instrument_next_status, instrument_patch, now
+            )
+            self._merge_entity_tx(
+                connection, method_id, method_next_status, method_patch, now
+            )
+            connection.execute(
+                "INSERT INTO entities(id, kind, status, version, data, created_by, created_at, updated_at) "
+                "VALUES (?, 'result', 'released', 1, ?, ?, ?, ?)",
+                (
+                    result_id,
+                    json.dumps(result_data, ensure_ascii=False, sort_keys=True),
+                    actor_id,
+                    now,
+                    now,
+                ),
+            )
+            self._audit_tx(
+                connection, batch_id, actor_id, actor_role, "review",
+                batch_row["status"], "released", {"reviewers": batch_patch.get("reviewers", [])}, now
+            )
+            self._audit_tx(
+                connection, instrument_id, actor_id, actor_role, "batch_release",
+                None, instrument_next_status, {"batch_id": batch_id, "patch": instrument_patch}, now
+            )
+            self._audit_tx(
+                connection, method_id, actor_id, actor_role, "batch_release",
+                None, method_next_status, {"batch_id": batch_id, "patch": method_patch}, now
+            )
+            self._audit_tx(
+                connection, result_id, actor_id, actor_role, "release",
+                None, "released", {"batch_id": batch_id, "result": result_data}, now
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return self.get_entity(batch_id)
+
+    @staticmethod
+    def _merge_entity_tx(connection, entity_id, next_status, patch, now):
+        row = connection.execute(
+            "SELECT status, version, data FROM entities WHERE id = ?", (entity_id,)
+        ).fetchone()
+        if not row:
+            raise NotFoundError("entity not found: " + entity_id)
+        merged = json.loads(row["data"])
+        merged.update(patch)
+        connection.execute(
+            "UPDATE entities SET status = ?, version = version + 1, data = ?, updated_at = ? "
+            "WHERE id = ?",
+            (next_status, json.dumps(merged, ensure_ascii=False, sort_keys=True), now, entity_id),
+        )
+
+    @staticmethod
+    def _audit_tx(connection, entity_id, actor_id, actor_role, action, from_status, to_status, detail, now):
+        connection.execute(
+            "INSERT INTO audit_log(entity_id, actor_id, actor_role, action, from_status, to_status, detail, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                entity_id,
+                actor_id,
+                actor_role,
+                action,
+                from_status,
+                to_status,
+                json.dumps(detail, ensure_ascii=False, sort_keys=True),
+                now,
+            ),
+        )
